@@ -196,26 +196,26 @@ class ViTAttention(nn.Module):
         self.key = nn.Linear(config.hidden_size, self.head_size, bias=config.qkv_bias)
         self.value = nn.Linear(config.hidden_size, self.head_size, bias=config.qkv_bias)
 
-        self.attention_output = nn.Linear(config.hidden_size, self.hidden_size)
+        self.attention_output = nn.Linear(config.hidden_size, config.hidden_size)
         self.attention_dropout = nn.Dropout(config.attention_dropout_rate)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-        pass
+        self, hidden_states: torch.Tensor, head_mask: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
         query = self.query(hidden_states)
         key = self.key(hidden_states)
         value = self.value(hidden_states)
 
         # transpose query and key to [batch_size, num_heads, seq_len, head_size]
-        query = query.transpose(1, 2).contiguous().view(
-            -1, query.size(1), self.num_heads, self.head_size
+        query = (
+            query.transpose(1, 2)
+            .contiguous()
+            .view(-1, query.size(1), self.num_heads, self.head_size)
         )
-        key = key.transpose(1, 2).contiguous().view(
-            -1, key.size(1), self.num_heads, self.head_size
+        key = (
+            key.transpose(1, 2)
+            .contiguous()
+            .view(-1, key.size(1), self.num_heads, self.head_size)
         )
 
         # calculate attention scores
@@ -224,19 +224,20 @@ class ViTAttention(nn.Module):
         if head_mask is not None:
             attention_scores = attention_scores * head_mask
 
-        attention_probs = F.softmax(attention_scores, dim=-1)
+        attentions = F.softmax(attention_scores, dim=-1)
 
-        attention_probs = self.attention_dropout(attention_probs)
+        attentions = self.attention_dropout(attentions)
 
-        context_layer = torch.matmul(attention_probs, value)
-        context_layer = context_layer.contiguous().view(
-            -1, context_layer.size(1), context_layer.size(2) * self.head_size
+        hidden_states = torch.matmul(attentions, value)
+        hidden_states = hidden_states.contiguous().view(
+            -1, hidden_states.size(1), hidden_states.size(2) * self.head_size
         )
-        context_layer = self.attention_output(context_layer)
-        if output_attentions:
-            return (context_layer, attention_probs)
+        hidden_states = self.attention_output(hidden_states)
 
-        return (context_layer)
+        return {
+            "hidden_states": hidden_states,
+            "attentions": attentions,
+        }
 
 
 class ViTOutputLayer(nn.Module):
@@ -288,26 +289,20 @@ class ViTLayer(nn.Module):
         self.layer_norm_after = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
         )
-        self.output = ViTOutputLayer(config)
+        self.output_layer = ViTOutputLayer(config)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+        self, hidden_states: torch.Tensor, head_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         hidden_states = self.layer_norm_before(hidden_states)
-        self_attention_outputs = self.attention(
-            hidden_states, head_mask, output_attentions=output_attentions
-        )
-        attention_output = self_attention_outputs[0]
-        attentions = attention_output[1:]
+        self_attention_outputs = self.attention(hidden_states, head_mask)
+        attentions = self_attention_outputs["attentions"]
 
         # residual connection
-        hidden_states = hidden_states + attention_output
+        hidden_states = hidden_states + self_attention_outputs["hidden_state"]
 
         mlp_output = self.layer_norm_after(hidden_states)
-        hidden_states = self.output(mlp_output)
+        hidden_states = self.output_layer(mlp_output)
 
         # residual connection
         hidden_states = hidden_states + mlp_output
@@ -329,18 +324,13 @@ class ViTEncoder(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
+        self, hidden_states: torch.Tensor, head_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
+        all_hidden_states = ()
+        all_self_attentions = ()
 
         for i, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
@@ -348,12 +338,10 @@ class ViTEncoder(nn.Module):
 
             hidden_states = layer_outputs["hidden_states"]
 
-            if output_attentions:
-                all_self_attentions = all_self_attentions + layer_outputs["attentions"]
+            all_self_attentions = all_self_attentions + layer_outputs["attentions"]
 
         # Add the last hidden state to the outputs.
-        if output_hidden_states:
-            all_hidden_states = (hidden_states,) + all_hidden_states
+        all_hidden_states = (hidden_states,) + all_hidden_states
 
         return {
             "last_hidden_state": hidden_states,
@@ -379,23 +367,20 @@ class ViTPooler(nn.Module):
 
 
 class ViTModel:
+
     def __init__(
         self,
         config: ViTConfig,
-        add_pooling_layer: bool = True,
         use_mask_token: bool = False,
     ):
         self.config = config
-        self.add_pooling_layer = add_pooling_layer
         self.use_mask_token = use_mask_token
 
         self.embeddings = ViTEmbeddings(config, use_mask_token=use_mask_token)
         self.encoder = ViTEncoder(config)
 
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.pooler = None
-        if add_pooling_layer:
-            self.pooler = ViTPooler(config)
+        self.pooler = ViTPooler(config)
 
     def forward(
         self,
@@ -405,7 +390,6 @@ class ViTModel:
         output_hidden_states: Optional[bool] = None,
         bool_masked_pos: Optional[bool] = None,
         interpolate_pos_encoding: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
         embedding_output = self.embeddings(
             pixel_values,
@@ -418,26 +402,14 @@ class ViTModel:
             head_mask=head_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
-        sequence_output = encoder_outputs[0]
-        sequence_output = self.layer_norm(sequence_output)
-        pooled_output = None
-        if self.pooler:
-            pooled_output = self.pooler(sequence_output)
-
-        if not return_dict:
-            head_outputs = (
-                (sequence_output, pooled_output)
-                if pooled_output is not None
-                else (sequence_output,)
-            )
-
-            return head_outputs + sequence_output[1:]
+        last_hidden_state = encoder_outputs["last_hidden_state"]
+        last_hidden_state = self.layer_norm(last_hidden_state)
+        pooled_output = self.pooler(last_hidden_state)
 
         return {
-            "last_hidden_state": sequence_output,
+            "last_hidden_state": last_hidden_state,
             "pooler_output": pooled_output,
-            "hidden_states": encoder_outputs.hidden_states,
+            "hidden_states": encoder_outputs["hidden_states"],
             "attentions": encoder_outputs.attentions,
         }
