@@ -96,7 +96,6 @@ class ViTEmbeddings(nn.Module):
         )
         self.dropout = nn.Dropout(config.hidden_dropout_rate)
         self.patch_size = config.patch_size
-        self.config = config
 
     def interpolate_pos_embedding(
         self, embeddings: torch.Tensor, width: int, height: int
@@ -301,8 +300,8 @@ class ViTLayer(nn.Module):
         # residual connection
         hidden_states = hidden_states + self_attention_outputs["hidden_state"]
 
-        mlp_output = self.layer_norm_after(hidden_states)
-        hidden_states = self.output_layer(mlp_output)
+        mlp_input = self.layer_norm_after(hidden_states)
+        mlp_output = self.output_layer(mlp_input)
 
         # residual connection
         hidden_states = hidden_states + mlp_output
@@ -318,13 +317,12 @@ class ViTEncoder(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
 
-        self.config = config
         self.layers = nn.ModuleList(
             [ViTLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: Optional[torch.Tensor] = None
+        self, hidden_states: torch.Tensor, head_masks: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         all_hidden_states = ()
         all_self_attentions = ()
@@ -332,9 +330,9 @@ class ViTEncoder(nn.Module):
         for i, layer in enumerate(self.layers):
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-            layer_head_mask = head_mask[i] if head_mask is not None else None
+            layer_head_mask = head_masks[i] if head_masks is not None else None
 
-            layer_outputs = layer(hidden_states, layer_head_mask, output_attentions)
+            layer_outputs = layer(hidden_states, layer_head_mask)
 
             hidden_states = layer_outputs["hidden_states"]
 
@@ -354,8 +352,8 @@ class ViTPooler(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
 
-        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.activation = nn.Tanh(config.hidden_activation)
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         "we pool the model by simply taking the hidden state corresponding to the first token"
@@ -373,7 +371,6 @@ class ViTModel:
         config: ViTConfig,
         use_mask_token: bool = False,
     ):
-        self.config = config
         self.use_mask_token = use_mask_token
 
         self.embeddings = ViTEmbeddings(config, use_mask_token=use_mask_token)
@@ -411,5 +408,5 @@ class ViTModel:
             "last_hidden_state": last_hidden_state,
             "pooler_output": pooled_output,
             "hidden_states": encoder_outputs["hidden_states"],
-            "attentions": encoder_outputs.attentions,
+            "attentions": encoder_outputs["attentions"],
         }
